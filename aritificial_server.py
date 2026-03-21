@@ -19,7 +19,7 @@ import sys
 app = Flask(__name__)
 
 # Default colors
-COLORS = ['red', 'green', 'blue', 'yellow', 'cyan']
+DEFAULT_COLORS = ['red', 'green', 'blue', 'yellow', 'cyan']
 
 # Parse command line arguments
 if len(sys.argv) > 1:
@@ -29,10 +29,12 @@ if len(sys.argv) > 1:
             COLORS = sys.argv[2:2+num_images]
         else:
             # Generate default colors if not provided
-            COLORS = COLORS[:num_images]
+            COLORS = [DEFAULT_COLORS[i % len(DEFAULT_COLORS)] for i in range(num_images)]
     except ValueError:
         print("Usage: python3 flask_png_server.py [num_images] [color1] [color2] ...")
         sys.exit(1)
+else:
+    COLORS = DEFAULT_COLORS
 
 @app.route('/')
 def index():
@@ -134,4 +136,4 @@ if __name__ == '__main__':
     print(f"\nPress Ctrl+C to stop")
     print()
     
-    app.run(host='127.0.0.1', port=5000, debug=False)
+    app.run(host='127.0.0.1', port=5002, debug=False)

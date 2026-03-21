@@ -92,32 +92,71 @@ static size_t stream_write_callback(void *contents, size_t size, size_t nmemb, v
     FILE *pipe = (FILE *)userp;
     
     size_t written = fwrite(contents, size, nmemb, pipe);
+    fprintf(stderr, "[curl] wrote %zu bytes to pipe\n", written * size);
+
     if (written != nmemb) {
         fprintf(stderr, "Error: Failed to write to FFmpeg pipe\n");
         return 0;
     }
+
     return realsize;
 }
 
 void* consumer_thread_func(void *arg) {
     stream_buf_state *buf = (stream_buf_state *)arg;
+
+    // This produces a VOD
     // FILE *ffmpeg_pipe = popen(
-    //     "ffmpeg -f image2pipe -pix_fmt rgb24 -s 1920x1080 -framerate 30 "
-    //     "-i pipe:0 -c:v mpeg4 -q:v 5 output.mp4 2>/dev/null",
+    //     "ffmpeg -y -f image2pipe "
+    //     "-framerate 1 "          /* Interpret the incoming stream as 1 frame per second */
+    //     "-i pipe:0 "             /* The input source */
+    //     "-c:v mpeg4 "
+    //     "-q:v 5 "
+    //     "output.mp4",
     //     "w"
     // );
+    // setvbuf(ffmpeg_pipe, NULL, _IOFBF, 65536);
 
-FILE *ffmpeg_pipe = popen(
-    "ffmpeg -y -f image2pipe "
-    "-framerate 1 "          /* Interpret the incoming stream as 1 frame per second */
-    "-i pipe:0 "             /* The input source */
-    "-c:v mpeg4 "
-    "-q:v 5 "
-    "output.mp4",
-    "w"
-);
+    //Stream from local network
+    // FILE *ffmpeg_pipe = popen(
+    //     "ffmpeg -y "
+    //     "-fflags nobuffer "
+    //     "-flags low_delay "
+    //     "-f image2pipe "
+    //     "-framerate 1 "
+    //     "-i pipe:0 "
+    //     "-c:v libx264 "
+    //     "-preset ultrafast "
+    //     "-tune zerolatency "
+    //     "-pix_fmt yuv420p "
+    //     "-f mpegts udp://192.168.8.133:1234",
+    //     "w"
+    // );
+    // setvbuf(ffmpeg_pipe, NULL, _IONBF, 0);  // unbuffered — frames go through immediately
+    //ffplay -fflags nobuffer -flags low_delay -framedrop udp://0.0.0.0:1234
 
-    setvbuf(ffmpeg_pipe, NULL, _IOFBF, 65536);
+    // Stream across different network
+    FILE *ffmpeg_pipe = popen(
+        "/home/g7zheng/.local/bin/ffmpeg -y "
+        "-fflags nobuffer "
+        "-flags low_delay "
+        "-f image2pipe "
+        "-vcodec png "
+        "-framerate 1 "
+        "-i pipe:0 "
+        "-c:v mpeg2video "
+        "-q:v 5 "
+        "-f mpegts pipe:1 2>/tmp/ffmpeg_log1.txt",
+        "w"
+    );
+    setvbuf(ffmpeg_pipe, NULL, _IONBF, 0);
+
+    if (!ffmpeg_pipe) {
+        fprintf(stderr, "popen failed: %s\n", strerror(errno));
+        return NULL;
+    }
+    // fprintf(stderr, "ffmpeg pipe opened successfully\n");
+
         
     // Keep consuming until producer signals done
     while (1) {
@@ -128,12 +167,17 @@ FILE *ffmpeg_pipe = popen(
             fprintf(stderr, "Error: CURL init failed on consumer stream thread\n");
             continue;
         }
+
+        if (buf->num_frames == buf->num_frames_produced && buf->done) {
+            // pthread_mutex_unlock(&buf->stream_buf_lock);
+            break;
+        }
         sem_wait(&buf->filled);
 
         pthread_mutex_lock(&buf->stream_buf_lock);
 
         char *url = crawl_state->pngs_list[buf->front];
-        printf("[Consumer] Got: %s \n", url);
+        fprintf(stderr, "[Consumer] Got: %s \n", url);
 
         // Move tail pointer
         buf->front = (buf->front + 1) % STREAM_BUFFER_ITEMS;
@@ -142,10 +186,7 @@ FILE *ffmpeg_pipe = popen(
         // Signal producer that space is available
         sem_post(&buf->empty);
 
-        if (buf->num_frames == buf->num_frames_produced && buf->done) {
-            pthread_mutex_unlock(&buf->stream_buf_lock);
-            break;
-        }
+
     
         pthread_mutex_unlock(&buf->stream_buf_lock);
         
@@ -157,11 +198,16 @@ FILE *ffmpeg_pipe = popen(
 
         CURLcode res = curl_easy_perform(curl);
 
-
+        fprintf(stderr, "[curl] perform result: %s\n", curl_easy_strerror(res));
+        long http_code;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        fprintf(stderr, "[curl] HTTP status: %ld\n", http_code);
 
         if (res == CURLE_OK) {
             fflush(ffmpeg_pipe);
-            printf("[Consumer] Frame %d: Downloaded and piped %s\n", frame_num, url);
+            // sleep(1);
+
+            fprintf(stderr, "[Consumer] Frame %d: Downloaded and piped %s\n", frame_num, url);
         } else {
             fprintf(stderr, "[Consumer] Error downloading %s: %s\n", url, curl_easy_strerror(res));
         }
@@ -169,9 +215,14 @@ FILE *ffmpeg_pipe = popen(
 
         curl_easy_cleanup(curl);
     }
-    
+    fprintf(stderr, "Closing ffmpeg pipe...\n");
+
+    fflush(ffmpeg_pipe);
+    sleep(2);
     pclose(ffmpeg_pipe);
-    printf("[✓] Video complete: %d frames\n", buf->num_frames);
+    fprintf(stderr, "ffmpeg pipe closed\n");
+
+    fprintf(stderr, "[✓] Video complete: %d frames\n", buf->num_frames);
     
     return NULL;
 }
@@ -428,7 +479,7 @@ void* search_url(void* arg) {
             sem_wait(&stream_state->empty);
             pthread_mutex_lock(&stream_state->stream_buf_lock);
             crawl_state->pngs_list[stream_state->back] = strdup(eurl);
-            printf("Wrote the following url to the buffer: %s\n", crawl_state->pngs_list[stream_state->back]);
+            fprintf(stderr, "Wrote the following url to the buffer: %s\n", crawl_state->pngs_list[stream_state->back]);
             stream_state->num_frames_produced++;
             stream_state->back = (stream_state->back+1) % STREAM_BUFFER_ITEMS;
             pthread_mutex_unlock(&stream_state->stream_buf_lock);
@@ -590,6 +641,10 @@ int main(int argc, char* argv[]) {
     for (int i =0; i < num_threads;++i) {
         pthread_join(tids[i], NULL);
     }
+
+    for (int i =0; i < num_cons_stream_threads; ++i) {
+        pthread_join(stream_tids[i], NULL);
+    }
     // printf("Check error\n");
 
     curl_global_cleanup();
@@ -600,7 +655,7 @@ int main(int argc, char* argv[]) {
     }
     times[1] = (tv.tv_sec) + tv.tv_usec/1000000.;
 
-    printf("findpng2 execution time: %.2lf seconds\n", times[1] - times[0]);
+    fprintf(stderr, "findpng2 execution time: %.2lf seconds\n", times[1] - times[0]);
     
     if (strcmp(url_logfile, "") != 0) {
         //write the urls to the logfile;
