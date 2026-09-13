@@ -1,5 +1,3 @@
-## lab4
+## Live Streamer
 
-In this lab, you will create a command-line tool:
-
-**`findpng2`**: A tool to  search some HTTP lab servers to find these URLs given a seed URL.
+A end-to-end system that will fetch frames for your live stream, based on some web link and stream those frames live in a video.
